@@ -5,13 +5,15 @@ const fetch = (...args) =>
   import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const app = express();
-// Use Render's PORT in production, fall back to 3000 locally
+// For Render it will use process.env.PORT, locally it's 3000
 const PORT = process.env.PORT || 3000;
 
-// 🔑 Your API key
+// 🔑 Your OpticOdds API key
 const API_KEY = "e8967ea5-9b93-4ba1-9657-0fd8b1b84497";
 
-// Helper: get YYYY-MM-DD in LOCAL time (PST for you)
+/* ==================== Helpers ==================== */
+
+// Get YYYY-MM-DD in local (PST) time
 function formatDateLocal(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -19,7 +21,7 @@ function formatDateLocal(date) {
   return `${year}-${month}-${day}`;
 }
 
-// Helper: format start time in PST like "4:00 PM"
+// Format start time in PST like "4:00 PM"
 function formatStartTimePST(isoString) {
   const date = new Date(isoString);
   return date.toLocaleTimeString("en-US", {
@@ -30,7 +32,7 @@ function formatStartTimePST(isoString) {
   });
 }
 
-// Helper: break an array into chunks of size n
+// Break an array into chunks of size n
 function chunkArray(arr, size) {
   const chunks = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -57,13 +59,35 @@ function formatAmerican(price) {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
+// Try to grab a team logo URL from various likely fields
+function getTeamLogo(game, side) {
+  const teamKey = side === "home" ? "home_team" : "away_team";
+  const teamLogoKey = `${teamKey}_logo`; // e.g. home_team_logo, away_team_logo
+
+  const teamObj = game[teamKey];
+
+  const candidates = [];
+
+  // Direct fixture-level logo fields
+  if (game[teamLogoKey]) candidates.push(game[teamLogoKey]);
+
+  // Nested team object fields (we don't know exact shape, so we try several)
+  if (teamObj) {
+    if (teamObj.logo) candidates.push(teamObj.logo);
+    if (teamObj.logo_url) candidates.push(teamObj.logo_url);
+    if (teamObj.image) candidates.push(teamObj.image);
+    if (teamObj.images && teamObj.images.logo) candidates.push(teamObj.images.logo);
+    if (teamObj.metadata && teamObj.metadata.logo) candidates.push(teamObj.metadata.logo);
+  }
+
+  // Return the first non-empty URL
+  return candidates.find((v) => typeof v === "string" && v.length > 0) || "";
+}
+
 // Fetch odds for a list of fixture IDs (FanDuel: ML + Spread + Total)
 async function fetchOddsForFixtures(fixtureIds) {
   const oddsByFixtureId = {};
-
-  if (!fixtureIds || fixtureIds.length === 0) {
-    return oddsByFixtureId;
-  }
+  if (!fixtureIds || fixtureIds.length === 0) return oddsByFixtureId;
 
   const batches = chunkArray(fixtureIds, 5);
 
@@ -126,7 +150,7 @@ async function fetchResultsForFixtures(fixtureIds) {
   return resultsById;
 }
 
-// 🔍 Safely pull scores from any of the shapes OpticOdds might use
+// Safely pull scores from any of the shapes OpticOdds might use
 function extractScores(game, resultFixture) {
   const candidates = [];
 
@@ -155,17 +179,24 @@ function extractScores(game, resultFixture) {
   return { homeScore: null, awayScore: null };
 }
 
+/* ==================== Main route ==================== */
+
 app.get("/", async (req, res) => {
   try {
     const now = new Date();
     const today = formatDateLocal(now);
 
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(now.getDate() - 1);
+    const yesterday = formatDateLocal(yesterdayDate);
+
     const tomorrowDate = new Date(now);
     tomorrowDate.setDate(now.getDate() + 1);
     const tomorrow = formatDateLocal(tomorrowDate);
 
-    // Fixtures for today & tomorrow (for schedule)
+    // Fixtures for yesterday, today & tomorrow
     const urls = [
+      `https://api.opticodds.com/api/v3/fixtures?sport=basketball&league=nba&start_date=${yesterday}`,
       `https://api.opticodds.com/api/v3/fixtures?sport=basketball&league=nba&start_date=${today}`,
       `https://api.opticodds.com/api/v3/fixtures?sport=basketball&league=nba&start_date=${tomorrow}`,
     ];
@@ -188,14 +219,11 @@ app.get("/", async (req, res) => {
     });
 
     if (allGames.length === 0) {
-      return res.send("<h1>No NBA games found for today or tomorrow.</h1>");
+      return res.send("<h1>No NBA games found for yesterday, today, or tomorrow.</h1>");
     }
 
-    // Get odds for these fixtures (FanDuel ML + Spread + Total)
     const fixtureIds = allGames.map((g) => g.id);
     const oddsByFixtureId = await fetchOddsForFixtures(fixtureIds);
-
-    // Get results (scores) for these fixtures by id
     const resultsById = await fetchResultsForFixtures(fixtureIds);
 
     // Group games by date
@@ -214,13 +242,13 @@ app.get("/", async (req, res) => {
       timeZone: "America/Los_Angeles",
     });
 
-    // Build HTML with styling + auto-refresh
+    // Build HTML
     let html = `
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>NBA Schedule (Today & Tomorrow)</title>
+  <title>NBA Schedule (Yesterday, Today & Tomorrow)</title>
   <meta http-equiv="refresh" content="30" />
   <style>
     body {
@@ -321,13 +349,26 @@ app.get("/", async (req, res) => {
       align-items: center;
       flex-wrap: wrap;
     }
-    .teams-names span {
-      white-space: nowrap;
-    }
     .vs {
       font-weight: 400;
       opacity: 0.7;
       margin: 0 4px;
+    }
+    .team-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .team-logo {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      object-fit: cover;
+      background: #020617;
+      border: 1px solid rgba(148,163,184,0.6);
+    }
+    .team-name {
+      white-space: nowrap;
     }
     .meta {
       display: flex;
@@ -359,7 +400,6 @@ app.get("/", async (req, res) => {
       background: #4b5563;
       color: #e5e7eb;
     }
-
     .final-box {
       background: #020617;
       border-radius: 12px;
@@ -384,7 +424,6 @@ app.get("/", async (req, res) => {
       font-size: 0.84rem;
       opacity: 0.85;
     }
-
     .odds-row {
       display: flex;
       align-items: center;
@@ -420,7 +459,6 @@ app.get("/", async (req, res) => {
       border-color: #ef4444;
       box-shadow: 0 0 0 1px rgba(239,68,68,0.25);
     }
-
     .no-odds {
       font-size: 0.75rem;
       opacity: 0.6;
@@ -430,7 +468,7 @@ app.get("/", async (req, res) => {
 </head>
 <body>
   <div class="container">
-    <h1>NBA Schedule (Today & Tomorrow)</h1>
+    <h1>NBA Schedule (Yesterday, Today & Tomorrow)</h1>
     <div class="subtitle-main">
       Powered by OpticOdds
     </div>
@@ -441,7 +479,8 @@ app.get("/", async (req, res) => {
 
     sortedDates.forEach((date) => {
       let tag = "";
-      if (date === today) tag = "Today";
+      if (date === yesterday) tag = "Yesterday";
+      else if (date === today) tag = "Today";
       else if (date === tomorrow) tag = "Tomorrow";
 
       html += `<div class="date-section">`;
@@ -450,7 +489,26 @@ app.get("/", async (req, res) => {
       }</div>`;
       html += `<div class="games-list">`;
 
-      gamesByDate[date].forEach((game) => {
+      let gamesForThisDate = gamesByDate[date] || [];
+
+      // For yesterday: only show completed games
+      if (date === yesterday) {
+        gamesForThisDate = gamesForThisDate.filter(
+          (g) => (g.status || "").toLowerCase() === "completed"
+        );
+      }
+
+      if (!gamesForThisDate.length) {
+        if (date === yesterday) {
+          html += `<div class="no-odds">No completed games for yesterday.</div>`;
+        } else {
+          html += `<div class="no-odds">No games scheduled.</div>`;
+        }
+        html += `</div></div>`;
+        return;
+      }
+
+      gamesForThisDate.forEach((game) => {
         const status = (game.status || "").toLowerCase();
         let statusClass = "status-unplayed";
         if (status === "live") statusClass = "status-live";
@@ -469,6 +527,17 @@ app.get("/", async (req, res) => {
         );
 
         const startTimePST = formatStartTimePST(game.start_date);
+
+        // Logos
+        const awayLogo = getTeamLogo(game, "away");
+        const homeLogo = getTeamLogo(game, "home");
+
+        const awayLogoHtml = awayLogo
+          ? `<img class="team-logo" src="${awayLogo}" alt="${game.away_team_display} logo" />`
+          : "";
+        const homeLogoHtml = homeLogo
+          ? `<img class="team-logo" src="${homeLogo}" alt="${game.home_team_display} logo" />`
+          : "";
 
         // Scores & winner
         const resultFixture = resultsById[game.id];
@@ -506,9 +575,15 @@ app.get("/", async (req, res) => {
           <div class="game-card-main">
             <div class="teams-row">
               <div class="teams-names">
-                <span>${game.away_team_display}</span>
+                <div class="team-chip">
+                  ${awayLogoHtml}
+                  <span class="team-name">${game.away_team_display}</span>
+                </div>
                 <span class="vs">@</span>
-                <span>${game.home_team_display}</span>
+                <div class="team-chip">
+                  ${homeLogoHtml}
+                  <span class="team-name">${game.home_team_display}</span>
+                </div>
               </div>
             </div>
             <div class="meta">
@@ -629,4 +704,5 @@ app.get("/", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
+
 
